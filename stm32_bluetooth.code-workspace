@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "stm32_master",
+			"path": "stm32_master"
+		},
+		{
+			"name": "esp32_sender",
+			"path": "esp32_sender"
+		}
+	],
+	"settings": {}
+}
