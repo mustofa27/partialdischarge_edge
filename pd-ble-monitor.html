@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PD BLE Monitor</title>
+<style>
+  /* Peran warna didefinisikan sekali di sini, dipakai lewat nama di seluruh
+     halaman, supaya mode terang/gelap tinggal menukar nilainya. */
+  :root {
+    color-scheme: light;
+    --surface:        #fcfcfb;
+    --surface-raised: #ffffff;
+    --border:         #dededa;
+    --grid:           #ebeae6;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #7a7975;
+    --series:         #2a78d6;
+    --series-soft:    rgba(42, 120, 214, 0.12);
+    --good:           #0ca30c;
+    --warning:        #fab219;
+    --critical:       #d03b3b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface:        #1a1a19;
+      --surface-raised: #232322;
+      --border:         #383835;
+      --grid:           #2b2b29;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #8d8c84;
+      --series:         #3987e5;
+      --series-soft:    rgba(57, 135, 229, 0.16);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface:        #1a1a19;
+    --surface-raised: #232322;
+    --border:         #383835;
+    --grid:           #2b2b29;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8d8c84;
+    --series:         #3987e5;
+    --series-soft:    rgba(57, 135, 229, 0.16);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    background: var(--surface); color: var(--text-primary);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-muted); font-size: 12.5px; margin: 2px 0 0; }
+  .spacer { flex: 1 1 auto; }
+
+  /* Status selalu ikon + teks, tidak pernah warna saja. */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface-raised);
+    font-size: 12.5px; color: var(--text-secondary); white-space: nowrap;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+  .pill[data-state="on"]  .dot { background: var(--good); }
+  .pill[data-state="off"] .dot { background: var(--text-muted); }
+  .pill[data-state="err"] .dot { background: var(--critical); }
+
+  button {
+    font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface-raised);
+    color: var(--text-primary); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--text-muted); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--series); border-color: var(--series); color: #fff; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .stat { background: var(--surface-raised); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .stat .v small { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+
+  .panel { background: var(--surface-raised); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+  .panel h2 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+  .panel .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
+
+  .controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; font-size: 12.5px; color: var(--text-secondary); }
+  .controls label { display: inline-flex; align-items: center; gap: 6px; }
+  select, input[type=number] {
+    font: inherit; font-size: 12.5px; padding: 4px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text-primary);
+  }
+
+  .chart-host { position: relative; }
+  canvas { display: block; width: 100%; height: 300px; }
+  #tip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-raised); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 9px; font-size: 12px; font-variant-numeric: tabular-nums;
+    box-shadow: 0 4px 14px rgba(0,0,0,.16); white-space: nowrap; z-index: 5;
+  }
+  #tip b { color: var(--series); }
+
+  pre#log {
+    margin: 0; max-height: 190px; overflow: auto; font-family: var(--mono);
+    font-size: 11.5px; line-height: 1.65; color: var(--text-secondary); white-space: pre-wrap;
+  }
+  .tablewrap { max-height: 260px; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  th, td { border-bottom: 1px solid var(--grid); padding: 3px 8px; text-align: right; }
+  th { color: var(--text-muted); font-weight: 500; text-align: right; position: sticky; top: 0; background: var(--surface-raised); }
+  td.idx { color: var(--text-muted); text-align: left; }
+
+  details summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+  .note {
+    border-left: 3px solid var(--warning); padding: 10px 14px; margin-bottom: 16px;
+    background: var(--surface-raised); border-radius: 0 8px 8px 0;
+    font-size: 13px; color: var(--text-secondary);
+  }
+  .note b { color: var(--text-primary); }
+  code { font-family: var(--mono); font-size: 0.92em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>PD BLE Monitor</h1>
+      <p class="sub">Nordic UART Service &middot; <code>6E400003</code> &middot; frame <code>{"data":[…]}</code></p>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="status" data-state="off"><span class="dot"></span><span id="statusText">Belum tersambung</span></span>
+    <button class="primary" id="btnConnect">Sambungkan</button>
+    <button id="btnDisconnect" disabled>Putus</button>
+  </header>
+
+  <div class="note" id="envNote" hidden></div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Frame</div><div class="v" id="sFrames">0</div></div>
+    <div class="stat"><div class="k">Sampel</div><div class="v" id="sSamples">0</div></div>
+    <div class="stat"><div class="k">Laju</div><div class="v" id="sRate">0 <small>sampel/dtk</small></div></div>
+    <div class="stat"><div class="k">Puncak</div><div class="v" id="sPeak">&mdash;</div></div>
+    <div class="stat"><div class="k">Dasar</div><div class="v" id="sBase">&mdash;</div></div>
+    <div class="stat"><div class="k">Drop di board</div><div class="v" id="sDrop">&mdash;</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Sinyal</h2>
+    <p class="hint" id="chartHint">Menunggu data dari board&hellip;</p>
+
+    <div class="controls">
+      <label>Tampilan
+        <select id="mode">
+          <option value="roll">Berjalan (gabungan frame)</option>
+          <option value="frame">Frame terakhir saja</option>
+        </select>
+      </label>
+      <label>Lebar jendela
+        <select id="window">
+          <option value="200">200 sampel</option>
+          <option value="500">500 sampel</option>
+          <option value="1000" selected>1000 sampel</option>
+          <option value="2000">2000 sampel</option>
+          <option value="4000">4000 sampel</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="lockY"> Kunci skala Y</label>
+      <label><input type="checkbox" id="paused"> Jeda</label>
+      <button id="btnClear">Bersihkan</button>
+      <button id="btnCsv" disabled>Unduh CSV</button>
+    </div>
+
+    <div class="chart-host">
+      <canvas id="chart" role="img" aria-label="Grafik sinyal partial discharge terhadap nomor sampel"></canvas>
+      <div id="tip"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Log dari board</h2>
+    <p class="hint">Karakteristik <code>6E4000FF</code> &mdash; baris <code>[STAT]</code> dikirim tiap 5 detik.</p>
+    <pre id="log">(belum ada)</pre>
+  </div>
+
+  <div class="panel">
+    <details>
+      <summary>Tabel nilai &mdash; frame terakhir</summary>
+      <div class="tablewrap" id="tableWrap" style="margin-top:12px">
+        <p class="hint" style="margin:0">Belum ada frame.</p>
+      </div>
+    </details>
+  </div>
+
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // DATA
+  const NUS_LOG     = '6e4000ff-b5a3-f393-e0a9-e50e24dcca9e';  // LOG
+
+  const MAX_SAMPLES = 8000;    // isi buffer berjalan di browser
+  const MAX_LOG     = 120;     // baris log yang disimpan
+
+  const $ = id => document.getElementById(id);
+  const el = {
+    status: $('status'), statusText: $('statusText'),
+    connect: $('btnConnect'), disconnect: $('btnDisconnect'),
+    clear: $('btnClear'), csv: $('btnCsv'),
+    frames: $('sFrames'), samples: $('sSamples'), rate: $('sRate'),
+    peak: $('sPeak'), base: $('sBase'), drop: $('sDrop'),
+    mode: $('mode'), window: $('window'), lockY: $('lockY'), paused: $('paused'),
+    canvas: $('chart'), tip: $('tip'), log: $('log'),
+    hint: $('chartHint'), tableWrap: $('tableWrap'), envNote: $('envNote'),
+  };
+
+  // ---------------------------------------------------------------- state
+  const roll = [];             // sampel berjalan lintas frame
+  let lastFrame = [];          // isi frame terakhir
+  let frames = 0, totalSamples = 0;
+  let firstAt = 0, lastAt = 0;
+  let lockedY = null;
+  let device = null, server = null;
+  let textBuf = '';            // penampung notify yang belum jadi satu baris
+  let logLines = [];
+  let needRedraw = false;
+
+  // ------------------------------------------------------- pemeriksaan env
+  (function checkEnv() {
+    const msgs = [];
+    if (!('bluetooth' in navigator)) {
+      msgs.push('<b>Browser ini tidak mendukung Web Bluetooth.</b> Pakai Chrome atau Edge di desktop/Android. Safari dan semua browser di iOS tidak mendukungnya — di iPhone/iPad pakai aplikasi Bluefy, atau nRF Connect.');
+    }
+    if (!window.isSecureContext) {
+      msgs.push('<b>Halaman ini bukan secure context</b>, jadi Web Bluetooth akan ditolak. Jalankan lewat localhost: buka terminal di folder berkas ini lalu <code>python3 -m http.server 8000</code>, dan kunjungi <code>http://localhost:8000/pd-ble-monitor.html</code>.');
+    }
+    if (msgs.length) { el.envNote.innerHTML = msgs.join('<br><br>'); el.envNote.hidden = false; el.connect.disabled = true; }
+  })();
+
+  function setStatus(state, text) {
+    el.status.dataset.state = state;
+    el.statusText.textContent = text;
+  }
+
+  // ------------------------------------------------------------ bluetooth
+  async function connect() {
+    try {
+      setStatus('off', 'Memilih perangkat…');
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS_SERVICE] }],
+        optionalServices: [NUS_SERVICE],
+      });
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+
+      setStatus('off', 'Menyambung…');
+      server = await device.gatt.connect();
+      const svc = await server.getPrimaryService(NUS_SERVICE);
+
+      // DATA — ini yang wajib. Tanpa startNotifications() board sengaja
+      // membuang isi buffernya, jadi langkah ini bukan opsional.
+      const tx = await svc.getCharacteristic(NUS_TX);
+      await tx.startNotifications();
+      tx.addEventListener('characteristicvaluechanged', e => onChunk(e.target.value));
+
+      // LOG — opsional; board lama tanpa karakteristik ini tetap jalan.
+      try {
+        const lg = await svc.getCharacteristic(NUS_LOG);
+        await lg.startNotifications();
+        lg.addEventListener('characteristicvaluechanged', e => onLog(e.target.value));
+      } catch (_) {
+        pushLog('(karakteristik log tidak tersedia di perangkat ini)');
+      }
+
+      setStatus('on', 'Tersambung: ' + (device.name || 'perangkat'));
+      el.connect.disabled = true;
+      el.disconnect.disabled = false;
+      el.hint.textContent = 'Tersambung. Kirim data ke board — grafik akan bergerak tiap satu frame masuk.';
+    } catch (err) {
+      if (err && err.name === 'NotFoundError') { setStatus('off', 'Dibatalkan'); return; }
+      setStatus('err', 'Gagal: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  function disconnect() {
+    if (device && device.gatt.connected) device.gatt.disconnect();
+    else onDisconnected();
+  }
+
+  function onDisconnected() {
+    setStatus('off', 'Terputus');
+    el.connect.disabled = false;
+    el.disconnect.disabled = true;
+  }
+
+  // Notify datang sebagai potongan MTU, bukan per baris. Potongan ditumpuk
+  // sampai bertemu '\n' — itulah batas satu frame yang ditulis sketch.
+  const dec = new TextDecoder();
+  function onChunk(dv) {
+    textBuf += dec.decode(dv.buffer ? dv.buffer : dv, { stream: true });
+    let nl;
+    while ((nl = textBuf.indexOf('\n')) >= 0) {
+      const line = textBuf.slice(0, nl).trim();
+      textBuf = textBuf.slice(nl + 1);
+      if (line) handleFrame(line);
+    }
+    if (textBuf.length > 64 * 1024) textBuf = '';   // jaga-jaga kalau '\n' hilang
+  }
+
+  function handleFrame(line) {
+    let arr = null;
+    try {
+      const o = JSON.parse(line);
+      if (Array.isArray(o)) arr = o;
+      else if (o && Array.isArray(o.data)) arr = o.data;
+    } catch (_) {
+      pushLog('frame tidak terbaca: ' + line.slice(0, 60));
+      return;
+    }
+    if (!arr || !arr.length) return;
+
+    const vals = arr.map(Number).filter(Number.isFinite);
+    lastFrame = vals;
+    frames++;
+    totalSamples += vals.length;
+
+    const now = performance.now();
+    if (!firstAt) firstAt = now;
+    lastAt = now;
+
+    if (!el.paused.checked) {
+      for (const v of vals) roll.push(v);
+      if (roll.length > MAX_SAMPLES) roll.splice(0, roll.length - MAX_SAMPLES);
+    }
+    el.csv.disabled = false;
+    needRedraw = true;
+    el.hint.textContent = 'Frame terakhir: ' + vals.length + ' sampel, diterima '
+                        + new Date().toLocaleTimeString('id-ID') + '.';
+    updateStats();
+    renderTable();
+  }
+
+  function onLog(dv) {
+    const t = dec.decode(dv.buffer ? dv.buffer : dv);
+    for (const line of t.split('\n')) if (line.trim()) pushLog(line.trim());
+    // ambil angka drop dari baris [STAT] supaya terlihat di kartu statistik
+    const m = /drop\s+(\d+)/.exec(t);
+    if (m) el.drop.textContent = Number(m[1]).toLocaleString('id-ID');
+  }
+
+  function pushLog(s) {
+    logLines.push(s);
+    if (logLines.length > MAX_LOG) logLines.shift();
+    el.log.textContent = logLines.join('\n');
+    el.log.scrollTop = el.log.scrollHeight;
+  }
+
+  // ----------------------------------------------------------- statistik
+  function updateStats() {
+    el.frames.textContent = frames.toLocaleString('id-ID');
+    el.samples.textContent = totalSamples.toLocaleString('id-ID');
+
+    const dt = (lastAt - firstAt) / 1000;
+    const rate = dt > 0.2 ? Math.round(totalSamples / dt) : 0;
+    el.rate.innerHTML = rate.toLocaleString('id-ID') + ' <small>sampel/dtk</small>';
+
+    if (lastFrame.length) {
+      const mx = Math.max(...lastFrame);
+      const sorted = [...lastFrame].sort((a, b) => a - b);
+      const med = sorted[sorted.length >> 1];
+      el.peak.textContent = mx.toLocaleString('id-ID');
+      el.base.textContent = med.toLocaleString('id-ID');
+    }
+  }
+
+  // --------------------------------------------------------------- grafik
+  const cv = el.canvas, ctx = cv.getContext('2d');
+  const PAD = { l: 54, r: 14, t: 14, b: 26 };
+  let view = { pts: [], x0: 0, lo: 0, hi: 1, plotW: 0, plotH: 0 };
+
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function sizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    needRedraw = true;
+  }
+
+  function currentSeries() {
+    if (el.mode.value === 'frame') return { pts: lastFrame, x0: 0 };
+    const win = Number(el.window.value);
+    const start = Math.max(0, roll.length - win);
+    return { pts: roll.slice(start), x0: totalSamples - (roll.length - start) };
+  }
+
+  function draw() {
+    const w = cv.clientWidth, h = cv.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+
+    const { pts, x0 } = currentSeries();
+    const plotW = w - PAD.l - PAD.r, plotH = h - PAD.t - PAD.b;
+    const cGrid = css('--grid'), cMuted = css('--text-muted'), cSeries = css('--series');
+
+    // skala Y: otomatis dari jendela yang terlihat, atau dikunci
+    let lo, hi;
+    if (pts.length) {
+      lo = Math.min(...pts); hi = Math.max(...pts);
+      if (el.lockY.checked) {
+        if (!lockedY) lockedY = [lo, hi];
+        [lo, hi] = lockedY;
+      } else lockedY = null;
+      const pad = (hi - lo) * 0.12 || 1;
+      const floor0 = lo >= 0;          // sinyal ADC tidak pernah negatif —
+      lo -= pad; hi += pad;            // jangan mengarang sumbu di bawah nol
+      if (floor0 && lo < 0) lo = 0;
+    } else { lo = 0; hi = 1; }
+    if (hi - lo < 1e-9) hi = lo + 1;
+
+    const X = i => PAD.l + (pts.length < 2 ? plotW / 2 : (i / (pts.length - 1)) * plotW);
+    const Y = v => PAD.t + plotH - ((v - lo) / (hi - lo)) * plotH;
+
+    // grid + label sumbu, sengaja dibuat pudar agar data yang menonjol
+    ctx.strokeStyle = cGrid; ctx.lineWidth = 1;
+    ctx.fillStyle = cMuted; ctx.font = '11px ' + css('--mono');
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (let g = 0; g <= 4; g++) {
+      const v = lo + (hi - lo) * (g / 4), y = Math.round(Y(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(w - PAD.r, y); ctx.stroke();
+      ctx.fillText(Math.round(v).toLocaleString('id-ID'), PAD.l - 8, y);
+    }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    if (pts.length > 1) {
+      for (let g = 0; g <= 4; g++) {
+        const i = Math.round((pts.length - 1) * g / 4);
+        ctx.fillText(String(x0 + i), X(i), PAD.t + plotH + 7);
+      }
+    }
+
+    if (!pts.length) {
+      ctx.fillStyle = cMuted; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '13px ' + css('--sans');
+      ctx.fillText('Belum ada data', PAD.l + plotW / 2, PAD.t + plotH / 2);
+      view = { pts, x0, lo, hi, plotW, plotH };
+      return;
+    }
+
+    // area lembut di bawah garis — memberi bobot visual tanpa menambah warna
+    ctx.beginPath(); ctx.moveTo(X(0), PAD.t + plotH);
+    for (let i = 0; i < pts.length; i++) ctx.lineTo(X(i), Y(pts[i]));
+    ctx.lineTo(X(pts.length - 1), PAD.t + plotH); ctx.closePath();
+    ctx.fillStyle = css('--series-soft'); ctx.fill();
+
+    // garis data: 2px, satu seri jadi tidak perlu legenda
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) { const x = X(i), y = Y(pts[i]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.strokeStyle = cSeries; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.stroke();
+
+    view = { pts, x0, lo, hi, plotW, plotH };
+  }
+
+  // ------------------------------------------------------ crosshair+tooltip
+  function onMove(ev) {
+    const r = cv.getBoundingClientRect();
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    const { pts, x0, lo, hi, plotW, plotH } = view;
+    if (!pts.length || mx < PAD.l - 6 || mx > PAD.l + plotW + 6) { el.tip.style.opacity = 0; return; }
+
+    const frac = Math.min(1, Math.max(0, (mx - PAD.l) / plotW));
+    const i = Math.round(frac * (pts.length - 1));
+    const x = PAD.l + (pts.length < 2 ? plotW / 2 : (i / (pts.length - 1)) * plotW);
+    const y = PAD.t + plotH - ((pts[i] - lo) / (hi - lo)) * plotH;
+
+    draw();
+    ctx.strokeStyle = css('--text-muted'); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, PAD.t + plotH); ctx.stroke();
+    ctx.setLineDash([]);
+    // penanda >= 8px, dengan cincin permukaan supaya tetap terbaca di atas garis
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = css('--series'); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = css('--surface-raised'); ctx.stroke();
+
+    el.tip.innerHTML = 'sampel <b>' + (x0 + i).toLocaleString('id-ID') + '</b><br>nilai <b>' + pts[i].toLocaleString('id-ID') + '</b>';
+    el.tip.style.opacity = 1;
+    const tw = el.tip.offsetWidth, th = el.tip.offsetHeight;
+    el.tip.style.left = Math.min(Math.max(4, x - tw / 2), cv.clientWidth - tw - 4) + 'px';
+    el.tip.style.top = Math.max(2, y - th - 12) + 'px';
+    void my;
+  }
+  cv.addEventListener('mousemove', onMove);
+  cv.addEventListener('mouseleave', () => { el.tip.style.opacity = 0; needRedraw = true; });
+
+  // ---------------------------------------------------------------- tabel
+  function renderTable() {
+    if (!lastFrame.length) return;
+    const COLS = 10;
+    let html = '<table><thead><tr><th class="idx">#</th>';
+    for (let c = 0; c < COLS; c++) html += '<th>+' + c + '</th>';
+    html += '</tr></thead><tbody>';
+    for (let r = 0; r < Math.ceil(lastFrame.length / COLS); r++) {
+      html += '<tr><td class="idx">' + (r * COLS) + '</td>';
+      for (let c = 0; c < COLS; c++) {
+        const i = r * COLS + c;
+        html += '<td>' + (i < lastFrame.length ? lastFrame[i].toLocaleString('id-ID') : '') + '</td>';
+      }
+      html += '</tr>';
+    }
+    el.tableWrap.innerHTML = html + '</tbody></table>';
+  }
+
+  // ---------------------------------------------------------------- aksi
+  el.connect.addEventListener('click', connect);
+  el.disconnect.addEventListener('click', disconnect);
+  el.clear.addEventListener('click', () => {
+    roll.length = 0; lastFrame = []; frames = 0; totalSamples = 0;
+    firstAt = lastAt = 0; lockedY = null; logLines = [];
+    el.log.textContent = '(belum ada)';
+    el.peak.textContent = el.base.textContent = el.drop.textContent = '—';
+    el.tableWrap.innerHTML = '<p class="hint" style="margin:0">Belum ada frame.</p>';
+    el.csv.disabled = true;
+    updateStats(); needRedraw = true;
+  });
+  el.csv.addEventListener('click', () => {
+    const rows = ['sampel,nilai'];
+    const base = totalSamples - roll.length;
+    roll.forEach((v, i) => rows.push((base + i) + ',' + v));
+    const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'pd-samples.csv'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  [el.mode, el.window, el.lockY].forEach(c => c.addEventListener('change', () => { lockedY = null; needRedraw = true; }));
+
+  window.addEventListener('resize', sizeCanvas);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { needRedraw = true; });
+
+  sizeCanvas();
+  (function tick() { if (needRedraw) { needRedraw = false; draw(); } requestAnimationFrame(tick); })();
+})();
+</script>
+</body>
+</html>
