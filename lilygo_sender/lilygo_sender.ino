@@ -99,7 +99,7 @@
 //  3. Konfigurasi
 // ===========================================================================
 // Sumber data masuk: 1 = Serial (USB-C/UART0, pengirim PC), 0 = Serial2 (pin)
-#define DATA_FROM_USB 1
+#define DATA_FROM_USB 0
 
 // Log status ke pin Serial2 (butuh USB-TTL kedua). 0 = mati.
 // Log selalu tersedia lewat BLE dan lewat halaman web, jadi ini jarang perlu.
@@ -131,11 +131,31 @@ static constexpr const char* AP_PASS = "pdsender123";     // min 8 karakter
 static constexpr uint8_t     WIFI_FAILS_BEFORE_AP = 3;
 static constexpr uint32_t    WIFI_CONNECT_MS = 15000;     // tunggu saat boot
 static constexpr uint32_t    WIFI_RETRY_MS   = 15000;     // jeda antar percobaan
+// Jeda percobaan STA saat AP pengaturan sedang menyala. Dibuat panjang supaya
+// AP tidak terus terganggu perpindahan kanal dan tetap terlihat di HP.
+static constexpr uint32_t    WIFI_RETRY_AP_MS = 60000;
 
 // --- Buffer sampel ---
 typedef uint16_t pd_sample_t;
 static constexpr uint32_t PD_SAMPLE_MAX     = 65535;
-static constexpr uint32_t PD_BUFFER_SAMPLES = 100;        // kirim tiap 100 angka
+// Ukuran buffer dipilih dari laju sumber yang diukur langsung dari STM32:
+// 244,25 sampel/detik rata-rata, dengan jitter 240..250 per detik.
+//
+// Syaratnya: publish MQTT tidak boleh lebih rapat dari 1 detik (server berat).
+//   N=250 -> 1,00 detik pada detik tercepat (250/detik) = TEPAT di batas, ditolak
+//   N=300 -> 1,20 detik pada detik tercepat, 1,23 detik rata-rata  <- dipakai
+// Konsekuensi lain di N=300: payload 1.210 B (data 3 digit) atau 1.810 B
+// (kalau ada pulsa 5 digit), RAM total ~4,3 KB, overhead header MQTT 3,6%.
+static constexpr uint32_t PD_BUFFER_SAMPLES = 300;
+
+// Jaring pengaman kalau sumber data suatu saat dipercepat: MQTT tidak akan
+// pernah publish lebih rapat dari ini, berapa pun cepatnya buffer terisi.
+// Frame yang belum boleh dikirim hanya menunggu — datanya tidak dibuang.
+static constexpr uint32_t MQTT_MIN_INTERVAL_MS = 1000;
+
+// Batas waktu sebuah frame boleh menggantung. Tanpa ini, satu tujuan yang macet
+// akan menghentikan penyerapan UART selamanya dan ring buffer meluap diam-diam.
+static constexpr uint32_t FRAME_TIMEOUT_MS = 5000;
 
 // {"data":[ + 100 angka 5 digit + 99 koma + ]} + '\n' + NUL + kelonggaran
 static constexpr size_t OUT_CAP =
@@ -196,6 +216,8 @@ static size_t g_outLen  = 0;   // JSON + '\n' (untuk BLE); 0 = slot kosong
 static size_t g_bleSent = 0;
 static bool   g_bleWant = false, g_mqttWant = false, g_mqttDone = false;
 
+static uint32_t g_frameAt = 0;      // kapan frame yang sedang terbang dibuat
+static uint32_t g_stuck   = 0;      // frame yang dipaksa pensiun karena macet
 static uint32_t g_frames = 0, g_dropped = 0;
 static uint32_t g_bleFrames = 0, g_mqttFrames = 0, g_mqttFail = 0;
 static uint32_t g_totalSamples = 0;
@@ -248,6 +270,38 @@ class LogSink : public Print {
 static LogSink logSink;
 #define SerialLog logSink
 
+// ===========================================================================
+//  5b. Reset kredensial WiFi tanpa program ulang
+// ===========================================================================
+// Tombol "Lupakan WiFi" di halaman web tidak menolong justru saat paling
+// dibutuhkan: kalau jaringan tersimpan hilang, halaman itu tidak terjangkau.
+// Karena itu ada dua jalan keluar yang tidak butuh komputer sama sekali:
+//
+//   1. Tekan tombol RST dua kali, jeda kurang dari 6 detik.
+//   2. Kirim teks "FORGET" (atau "RESET") ke karakteristik BLE 6E400002
+//      dari nRF Connect / LightBlue.
+//
+// Cara 1 memakai RTC memory, yang isinya bertahan saat reset tombol tapi
+// hilang saat listrik benar-benar putus — persis sifat yang dibutuhkan untuk
+// membedakan "ditekan dua kali" dari "baru dinyalakan". Dua kata dipakai
+// (nilai + komplemennya) karena RTC memory berisi sampah acak saat cold boot,
+// dan sampah itu bisa saja kebetulan sama dengan satu nilai penanda.
+static constexpr uint32_t DRD_WINDOW_MS = 6000;
+#define DRD_MAGIC 0xD00DF00Du
+RTC_NOINIT_ATTR static uint32_t g_drdA;
+RTC_NOINIT_ATTR static uint32_t g_drdB;
+
+static volatile bool g_forgetReq = false;   // diminta lewat BLE, dieksekusi di loop()
+
+static void credsClear(const char* why) {
+  prefs.begin("pdsender", false);
+  prefs.clear();
+  prefs.end();
+  g_ssid = "";
+  g_pass = "";
+  SerialLog.printf("[CFG ] kredensial WiFi DIHAPUS (%s)\n", why);
+}
+
 static String ringText() {
   String s;
   s.reserve(g_ringLen + 1);
@@ -261,10 +315,9 @@ static String ringText() {
 // ===========================================================================
 //   biru    : kedip = WiFi belum tersambung, nyala tetap = tersambung
 //   merah   : kedip = MQTT belum tersambung, nyala tetap = tersambung
-//   onboard : kedip sekejap tiap satu frame selesai dikirim
+//   onboard : kedip cepat selama ADA data serial masuk, padam kalau sepi
 static Ticker            ledTicker;
 static volatile bool     g_wifiUp = false, g_mqttUp = false;
-static volatile uint32_t g_flashUntil = 0;
 
 static void ledTick() {
   static bool phase = false;
@@ -273,15 +326,38 @@ static void ledTick() {
   digitalWrite(LED_RED_PIN,  g_mqttUp ? HIGH : (phase ? HIGH : LOW));
 }
 
-static void flashBoard() {
-  digitalWrite(BOARD_LED_PIN, BOARD_LED_ACTIVE_HIGH ? HIGH : LOW);
-  g_flashUntil = millis() + 40;
+// --- LED onboard = ada tidaknya data serial masuk -------------------------
+// Sengaja TIDAK dikedipkan per byte: pada 1.220 B/detik hasilnya akan terlihat
+// menyala terus, tidak bisa dibedakan dari lampu mati-hidup biasa. Yang
+// dilakukan: tiap RX_BLINK_MS diperiksa apakah ADA byte masuk sejak periksa
+// terakhir — kalau ada, LED dibalik keadaannya; kalau sepi, LED dimatikan.
+// Hasilnya kedipan mantap ~6 kali/detik selama data mengalir, dan padam total
+// begitu aliran berhenti.
+static constexpr uint32_t RX_BLINK_MS = 80;
+static uint32_t g_rxSinceBlink = 0;     // byte masuk sejak pemeriksaan terakhir
+static uint32_t g_rxTotal      = 0;     // total byte masuk sejak boot
+static bool     g_rxLedOn      = false;
+
+static void boardLed(bool on) {
+#if BOARD_LED_ACTIVE_HIGH
+  digitalWrite(BOARD_LED_PIN, on ? HIGH : LOW);
+#else
+  digitalWrite(BOARD_LED_PIN, on ? LOW : HIGH);
+#endif
 }
-static void flashService() {
-  if (g_flashUntil && (int32_t)(millis() - g_flashUntil) >= 0) {
-    digitalWrite(BOARD_LED_PIN, BOARD_LED_ACTIVE_HIGH ? LOW : HIGH);
-    g_flashUntil = 0;
+
+static void rxLedService() {
+  static uint32_t last = 0;
+  if (millis() - last < RX_BLINK_MS) return;
+  last = millis();
+
+  if (g_rxSinceBlink) {
+    g_rxLedOn = !g_rxLedOn;     // ada aliran -> kedip
+    g_rxSinceBlink = 0;
+  } else {
+    g_rxLedOn = false;          // sepi -> padam
   }
+  boardLed(g_rxLedOn);
 }
 
 // ===========================================================================
@@ -321,6 +397,7 @@ static void encodeFrame() {
   g_bleWant  = bleDataReady();
   g_mqttWant = mqttReady();
   g_mqttDone = false;
+  g_frameAt  = millis();
   g_len      = 0;
   g_frames++;
   g_totalSamples += PD_BUFFER_SAMPLES;
@@ -347,6 +424,8 @@ static void drainSerialData() {
   static bool     has = false;
   while (SerialData.available()) {
     int c = SerialData.read();
+    g_rxSinceBlink++;                 // menggerakkan LED onboard
+    g_rxTotal++;
     if (c >= '0' && c <= '9') {
       acc = acc * 10 + (uint32_t)(c - '0');
       if (acc > PD_SAMPLE_MAX) acc = PD_SAMPLE_MAX;
@@ -365,10 +444,21 @@ static void retireIfDone() {
   if (g_outLen == 0) return;
   bool bleOk  = !g_bleWant  || g_bleSent >= g_outLen;
   bool mqttOk = !g_mqttWant || g_mqttDone;
-  if (bleOk && mqttOk) {
+
+  // Katup pengaman: selama frame menggantung, penyerapan UART berhenti. Kalau
+  // sebuah tujuan macet, frame harus tetap dilepas — kehilangan satu frame yang
+  // tercatat jauh lebih baik daripada ring buffer UART meluap tanpa jejak.
+  bool timedOut = (millis() - g_frameAt) > FRAME_TIMEOUT_MS;
+  if (timedOut && !(bleOk && mqttOk)) {
+    g_stuck++;
+    g_dropped += PD_BUFFER_SAMPLES;
+    SerialLog.printf("[FRAME] macet >%lu ms (ble=%d mqtt=%d), dipaksa lepas\n",
+                     (unsigned long)FRAME_TIMEOUT_MS, (int)bleOk, (int)mqttOk);
+  }
+
+  if ((bleOk && mqttOk) || timedOut) {
     g_outLen = g_jsonLen = g_bleSent = 0;
     g_bleWant = g_mqttWant = g_mqttDone = false;
-    flashBoard();
   }
 }
 
@@ -404,6 +494,19 @@ class LogSubCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+// Perintah dari HP lewat karakteristik RX. Hanya menaikkan bendera — kerja
+// beratnya (hapus NVS + restart) dilakukan loop(), supaya tidak memanggil
+// balik stack BLE dari dalam callback-nya sendiri.
+class RxCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+    std::string v = c->getValue();
+    for (auto& ch : v) ch = (char)toupper((unsigned char)ch);
+    if (v.find("FORGET") != std::string::npos || v.find("RESET") != std::string::npos) {
+      g_forgetReq = true;
+    }
+  }
+};
+
 static void bleBegin() {
   NimBLEDevice::init(BLE_DEVICE_NAME);
   NimBLEDevice::setMTU(247);
@@ -420,9 +523,12 @@ static void bleBegin() {
   g_chLog = svc->createCharacteristic(NUS_LOG_UUID, NIMBLE_PROPERTY::NOTIFY);
   g_chLog->setCallbacks(new LogSubCallbacks());
 
-  // RX tidak dipakai, hanya supaya aplikasi terminal mengenali NUS yang lengkap.
-  svc->createCharacteristic(NUS_RX_UUID,
-                            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  // RX dipakai untuk satu hal: perintah menghapus kredensial WiFi dari HP,
+  // saat halaman web sudah tidak terjangkau.
+  NimBLECharacteristic* rx =
+      svc->createCharacteristic(NUS_RX_UUID,
+                                NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  rx->setCallbacks(new RxCallbacks());
   svc->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -540,7 +646,13 @@ static void mqttPump() {
   if (g_outLen == 0 || !g_mqttWant || g_mqttDone) return;
   if (!mqtt.connected()) { g_mqttWant = false; return; }
 
+  // Jaga jarak minimum antar publish. Frame tidak dibuang, hanya menunggu —
+  // data yang masuk selama menunggu tertampung di ring buffer UART.
+  static uint32_t lastPub = 0;
+  if (lastPub && millis() - lastPub < MQTT_MIN_INTERVAL_MS) return;
+
   if (mqtt.publish(MQTT_TOPIC, (const uint8_t*)g_out, g_jsonLen, false)) {
+    lastPub = millis();
     g_mqttDone = true;
     g_mqttFrames++;
   } else {
@@ -598,7 +710,11 @@ max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0;colo
 
 <div class="c"><h2>Lain-lain</h2>
 <form method="POST" action="/forget" onsubmit="return confirm('Hapus kredensial WiFi dan restart?')">
-<button class="g" type="submit">Lupakan WiFi &amp; restart</button></form></div>
+<button class="g" type="submit">Lupakan WiFi &amp; restart</button></form>
+<p style="font-size:12px;color:var(--tx2);margin:12px 0 0">Kalau halaman ini tidak
+terjangkau (jaringan tersimpan hilang), kredensial tetap bisa dihapus tanpa komputer:
+tekan tombol <b>RST</b> di board dua kali dengan jeda di bawah 6 detik, atau kirim teks
+<b>FORGET</b> ke karakteristik BLE <code>6E400002</code> lewat nRF Connect.</p></div>
 
 </div><script>
 function pill(b){return '<span class="p '+(b?'on':'off')+'">'+(b?'ya':'tidak')+'</span>'}
@@ -702,9 +818,7 @@ static void handleSave() {
 }
 
 static void handleForget() {
-  prefs.begin("pdsender", false);
-  prefs.clear();
-  prefs.end();
+  credsClear("tombol di halaman web");
   web.send(200, "text/html",
            "<meta charset=utf-8><body style='font:15px system-ui;padding:24px'>"
            "Kredensial dihapus. Board restart ke mode pengaturan.</body>");
@@ -738,10 +852,26 @@ static void webBegin() {
 // ===========================================================================
 static void startAp() {
   if (g_apMode) return;
-  g_apMode = true;
-  WiFi.mode(WIFI_AP_STA);                 // STA tetap hidup supaya bisa terus mencoba
-  WiFi.softAP(AP_SSID, AP_PASS);
+
+  // Selama STA berstatus "connecting", driver WiFi ESP32 MENOLAK setiap
+  // perubahan konfigurasi — gejalanya baris "wifi:sta is connecting, cannot
+  // set config" dan softAP() yang gagal tanpa membuat error terlihat. Jadi
+  // usaha menyambung dihentikan dulu. Argumen (false,false) = jangan matikan
+  // radio, jangan hapus kredensial tersimpan.
+  WiFi.disconnect(false, false);
+  delay(150);
+
+  WiFi.mode(WIFI_AP_STA);
+  bool ok = WiFi.softAP(AP_SSID, AP_PASS);
   delay(200);
+  if (!ok) {
+    // Jangan set g_apMode: biar dicoba lagi di putaran berikutnya, bukan
+    // dianggap sudah menyala padahal tidak.
+    SerialLog.println("[AP  ] GAGAL menyalakan access point, akan dicoba lagi");
+    return;
+  }
+
+  g_apMode = true;
   dns.start(53, "*", WiFi.softAPIP());
   SerialLog.printf("[AP  ] \"%s\" pass \"%s\" -> http://%s\n",
                    AP_SSID, AP_PASS, WiFi.softAPIP().toString().c_str());
@@ -794,14 +924,23 @@ static bool wifiEnsure() {
   if (!g_ssid.length()) { startAp(); return false; }
 
   static uint32_t lastTry = 0;
-  if (millis() - lastTry < WIFI_RETRY_MS) return false;
+  // Saat AP menyala, percobaan STA dijarangkan. AP dan STA berbagi satu radio
+  // dan harus sekanal: STA yang sedang memindai menyeret kanal AP ikut pindah,
+  // sehingga AP hilang-timbul dari daftar scan HP persis ketika Anda sedang
+  // berusaha menyambunginya untuk mengganti setelan.
+  uint32_t gap = g_apMode ? WIFI_RETRY_AP_MS : WIFI_RETRY_MS;
+  if (millis() - lastTry < gap) return false;
   lastTry = millis();
 
   if (g_wifiFail < 255) g_wifiFail++;
+
+  // AP dinyalakan LEBIH DULU, sebelum WiFi.begin() membuat STA sibuk. Kalau
+  // urutannya terbalik, driver menolak konfigurasi AP dan portal pengaturan
+  // tidak pernah muncul — tepat yang terjadi sebelum perbaikan ini.
+  if (g_wifiFail >= WIFI_FAILS_BEFORE_AP) startAp();
+
   SerialLog.printf("[WIFI] mencoba lagi (%u)...\n", g_wifiFail);
   WiFi.begin(g_ssid.c_str(), g_pass.c_str());
-
-  if (g_wifiFail >= WIFI_FAILS_BEFORE_AP) startAp();
   return false;
 }
 
@@ -826,12 +965,29 @@ void setup() {
   pinMode(BOARD_LED_PIN, OUTPUT);
   digitalWrite(LED_BLUE_PIN, LOW);
   digitalWrite(LED_RED_PIN, LOW);
-  digitalWrite(BOARD_LED_PIN, BOARD_LED_ACTIVE_HIGH ? LOW : HIGH);
+  boardLed(false);
   ledTicker.attach_ms(300, ledTick);
 
   bleBegin();
 
   SerialLog.println("\n=== PD Sender WiFi+BT - LilyGO T-SIM7600G ===");
+
+  // Deteksi tekan-RST-dua-kali. Harus dijalankan SEBELUM wifiBegin(), karena
+  // di sanalah kredensial dibaca dari NVS.
+  if (g_drdA == DRD_MAGIC && g_drdB == ~DRD_MAGIC) {
+    g_drdA = 0;
+    g_drdB = 0;
+    credsClear("tombol RST ditekan dua kali");
+    for (int i = 0; i < 6; i++) {          // kedipan tanda supaya terlihat
+      digitalWrite(LED_RED_PIN, HIGH); digitalWrite(LED_BLUE_PIN, HIGH); delay(120);
+      digitalWrite(LED_RED_PIN, LOW);  digitalWrite(LED_BLUE_PIN, LOW);  delay(120);
+    }
+  } else {
+    g_drdA = DRD_MAGIC;
+    g_drdB = ~DRD_MAGIC;
+    SerialLog.printf("[CFG ] tekan RST sekali lagi dalam %lu detik untuk menghapus WiFi\n",
+                     (unsigned long)(DRD_WINDOW_MS / 1000));
+  }
 #if ENABLE_BLE
   SerialLog.printf("[BLE ] advertising sebagai \"%s\"\n", BLE_DEVICE_NAME);
 #endif
@@ -860,11 +1016,33 @@ void setup() {
 }
 
 void loop() {
+  // Lewat jendela deteksi -> penanda dilucuti, jadi reset berikutnya dianggap
+  // boot biasa, bukan tekan-dua-kali.
+  static bool drdArmed = true;
+  if (drdArmed && millis() > DRD_WINDOW_MS) {
+    drdArmed = false;
+    g_drdA = 0;
+    g_drdB = 0;
+  }
+
+  // Perintah FORGET dari BLE (dieksekusi di sini, bukan di dalam callback).
+  if (g_forgetReq) {
+    g_forgetReq = false;
+    credsClear("perintah FORGET lewat BLE");
+    delay(300);
+    ESP.restart();
+  }
+
   if (g_apMode) dns.processNextRequest();
   web.handleClient();
 
   bleServiceAdv();
-  drainSerialData();
+
+  // Selama sebuah frame masih terbang, UART SENGAJA tidak diserap. Byte yang
+  // masuk menumpuk di ring buffer driver (DATA_RX_BUF = 16384 B = 3.276 sampel
+  // = 13,4 detik pada laju 244/detik), lalu terbaca utuh setelah frame lepas.
+  // Ini menggantikan perilaku lama yang membuang sampel saat slot kirim sibuk.
+  if (g_outLen == 0) drainSerialData();
 
   g_wifiUp = wifiEnsure();
   g_mqttUp = mqttEnsure();
@@ -872,20 +1050,24 @@ void loop() {
   if (g_mqttUp) mqtt.loop();
 #endif
 
-  drainSerialData();
+  if (g_outLen == 0) drainSerialData();
   bleTxPump();
   mqttPump();
   retireIfDone();
-  flashService();
+  rxLedService();
 
   static uint32_t lastLog = 0;
   if (millis() - lastLog >= 5000) {
     lastLog = millis();
-    SerialLog.printf("[STAT] wifi=%d mqtt=%d ble=%d | isi %lu/%lu | frame %lu (mqtt %lu, ble %lu) | drop %lu | heap %lu\n",
+    SerialLog.printf("[STAT] wifi=%d mqtt=%d ble=%d | rx %lu B | isi %lu/%lu | antre %u B | "
+                     "frame %lu (mqtt %lu, ble %lu) | drop %lu | macet %lu | heap %lu\n",
                      (int)g_wifiUp, (int)mqttReady(), (int)bleDataReady(),
+                     (unsigned long)g_rxTotal,
                      (unsigned long)g_len, (unsigned long)PD_BUFFER_SAMPLES,
+                     (unsigned)SerialData.available(),
                      (unsigned long)g_frames, (unsigned long)g_mqttFrames,
                      (unsigned long)g_bleFrames, (unsigned long)g_dropped,
+                     (unsigned long)g_stuck,
                      (unsigned long)ESP.getFreeHeap());
   }
 }

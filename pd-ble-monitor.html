@@ -196,6 +196,14 @@
   </div>
 
   <div class="panel">
+    <h2>Perangkat</h2>
+    <p class="hint">Perintah dikirim ke karakteristik <code>6E400002</code> lewat Bluetooth,
+    jadi tetap bekerja walaupun board sedang tidak punya WiFi sama sekali.</p>
+    <button id="btnForget" disabled>Lupakan WiFi board</button>
+    <span id="forgetMsg" class="hint" style="margin-left:10px"></span>
+  </div>
+
+  <div class="panel">
     <details>
       <summary>Tabel nilai &mdash; frame terakhir</summary>
       <div class="tablewrap" id="tableWrap" style="margin-top:12px">
@@ -211,6 +219,7 @@
   'use strict';
 
   const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_RX      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // PERINTAH ke board
   const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // DATA
   const NUS_LOG     = '6e4000ff-b5a3-f393-e0a9-e50e24dcca9e';  // LOG
 
@@ -222,6 +231,7 @@
     status: $('status'), statusText: $('statusText'),
     connect: $('btnConnect'), disconnect: $('btnDisconnect'),
     clear: $('btnClear'), csv: $('btnCsv'),
+    forget: $('btnForget'), forgetMsg: $('forgetMsg'),
     frames: $('sFrames'), samples: $('sSamples'), rate: $('sRate'),
     peak: $('sPeak'), base: $('sBase'), drop: $('sDrop'),
     mode: $('mode'), window: $('window'), lockY: $('lockY'), paused: $('paused'),
@@ -235,7 +245,7 @@
   let frames = 0, totalSamples = 0;
   let firstAt = 0, lastAt = 0;
   let lockedY = null;
-  let device = null, server = null;
+  let device = null, server = null, rxChar = null;
   let textBuf = '';            // penampung notify yang belum jadi satu baris
   let logLines = [];
   let needRedraw = false;
@@ -286,6 +296,16 @@
         pushLog('(karakteristik log tidak tersedia di perangkat ini)');
       }
 
+      // RX — jalur perintah ke board. Opsional: kalau firmware lama tidak
+      // punya, sisa halaman tetap berfungsi penuh.
+      try {
+        rxChar = await svc.getCharacteristic(NUS_RX);
+        el.forget.disabled = false;
+      } catch (_) {
+        rxChar = null;
+        pushLog('(karakteristik perintah tidak tersedia — tombol Lupakan WiFi dimatikan)');
+      }
+
       setStatus('on', 'Tersambung: ' + (device.name || 'perangkat'));
       el.connect.disabled = true;
       el.disconnect.disabled = false;
@@ -305,6 +325,29 @@
     setStatus('off', 'Terputus');
     el.connect.disabled = false;
     el.disconnect.disabled = true;
+    el.forget.disabled = true;
+    rxChar = null;
+  }
+
+  // Kirim "FORGET" ke board. Board menghapus kredensial WiFi lalu restart,
+  // jadi koneksi BLE ini memang akan putus sesudahnya — itu tanda berhasil.
+  async function forgetWifi() {
+    if (!rxChar) return;
+    if (!confirm('Hapus SSID dan password WiFi yang tersimpan di board?\n\n'
+               + 'Board akan restart dan menyalakan access point "PD-Sender-Setup".')) return;
+    el.forget.disabled = true;
+    el.forgetMsg.textContent = 'mengirim…';
+    try {
+      const cmd = new TextEncoder().encode('FORGET');
+      // Karakteristiknya punya WRITE dan WRITE_NR; pakai yang berbalas kalau ada.
+      if (rxChar.writeValueWithResponse) await rxChar.writeValueWithResponse(cmd);
+      else                               await rxChar.writeValue(cmd);
+      el.forgetMsg.textContent = 'terkirim — board restart, koneksi akan putus.';
+      pushLog('>>> perintah FORGET dikirim ke board');
+    } catch (err) {
+      el.forgetMsg.textContent = 'gagal: ' + (err && err.message ? err.message : err);
+      el.forget.disabled = false;
+    }
   }
 
   // Notify datang sebagai potongan MTU, bukan per baris. Potongan ditumpuk
@@ -527,6 +570,7 @@
   // ---------------------------------------------------------------- aksi
   el.connect.addEventListener('click', connect);
   el.disconnect.addEventListener('click', disconnect);
+  el.forget.addEventListener('click', forgetWifi);
   el.clear.addEventListener('click', () => {
     roll.length = 0; lastFrame = []; frames = 0; totalSamples = 0;
     firstAt = lastAt = 0; lockedY = null; logLines = [];
