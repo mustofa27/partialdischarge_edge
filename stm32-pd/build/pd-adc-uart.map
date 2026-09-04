@@ -171,11 +171,11 @@ LOAD linker stubs
  .debug_line    0x00000000      0x51e build/src/main.o
  .debug_line    0x0000051e       0xcd build/src/startup.o
 
-.debug_str      0x00000000     0x3667
- .debug_str     0x00000000     0x3667 build/src/main.o
-                               0x3634 (size before relaxing)
- .debug_str     0x00003667        0x0 build/src/startup.o
-                               0x2f7e (size before relaxing)
+.debug_str      0x00000000     0x3668
+ .debug_str     0x00000000     0x3668 build/src/main.o
+                               0x3635 (size before relaxing)
+ .debug_str     0x00003668        0x0 build/src/startup.o
+                               0x2f7f (size before relaxing)
 
 .comment        0x00000000       0x12
  .comment       0x00000000       0x12 build/src/main.o

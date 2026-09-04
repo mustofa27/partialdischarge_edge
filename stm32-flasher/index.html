@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STM32 Flasher</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;      --panel: #ffffff;   --ink: #16181d;
+    --muted: #6b7280;   --line: #e3e6ea;    --accent: #2f6fed;
+    --ok: #1a7f4b;      --err: #c02a2a;     --warn: #b4690e;
+    --logbg: #12141a;   --logink: #d7dbe3;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1014;    --panel: #171a20;   --ink: #e6e8ec;
+      --muted: #939aa6; --line: #272b33;    --accent: #5b8cf7;
+      --ok: #46c07f;    --err: #f06d6d;     --warn: #e0a33c;
+      --logbg: #0a0c10; --logink: #d7dbe3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 22px 20px 40px; }
+
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; }
+
+  .pill {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 13px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel); font-size: 13px; font-weight: 500;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .pill.on  .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+  .pill.off .dot { background: var(--err); }
+
+  .grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.05fr); gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 16px 17px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 5px; }
+  input[type=text] {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  input[type=text]:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; }
+  .row { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 13px; }
+  .field + .field { margin-top: 12px; }
+
+  button {
+    padding: 9px 15px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: background .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.07); }
+  button.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, var(--line)); }
+
+  .drop {
+    border: 1.5px dashed var(--line); border-radius: 9px; padding: 20px 14px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .12s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); color: var(--ink);
+                            background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .drop b { color: var(--ink); }
+
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 5px 16px;
+          font-size: 12.5px; margin-top: 4px; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .binlist { list-style: none; margin: 0; padding: 0; }
+  .binlist li { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+                border-top: 1px solid var(--line); font-size: 13px; }
+  .binlist li:first-child { border-top: 0; }
+  .binlist .nm { font-family: ui-monospace, Menlo, monospace; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+  .binlist .sz { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
+
+  .logcard { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .logbar { display: flex; align-items: center; gap: 10px; padding: 11px 14px;
+            border-bottom: 1px solid var(--line); }
+  .logbar h2 { margin: 0; }
+  .logbar .spacer { margin-left: auto; }
+  .logbar small { color: var(--muted); font-size: 12px; }
+  pre#log {
+    margin: 0; padding: 13px 14px; background: var(--logbg); color: var(--logink);
+    font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    height: 60vh; min-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  #log .cmd  { color: #7aa2f7; font-weight: 600; }
+  #log .ok   { color: #6bd39a; }
+  #log .err  { color: #f47c7c; }
+  #log .blank { display: block; height: .5em; }
+
+  .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--err); color: var(--err);
+    padding: 10px 16px; border-radius: 9px; font-size: 13px; box-shadow: 0 6px 22px rgba(0,0,0,.18);
+    opacity: 0; pointer-events: none; transition: opacity .18s;
+  }
+  .toast.show { opacity: 1; }
+  details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+  details[open] summary { margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>STM32 Flasher</h1>
+      <div class="sub">Build &amp; upload firmware lewat ST-LINK</div>
+    </div>
+    <div class="pill" id="pill"><span class="dot"></span><span id="pillText">memeriksa…</span></div>
+  </header>
+
+  <div class="grid">
+    <div>
+      <!-- proyek -->
+      <section class="card">
+        <h2>Dari folder proyek</h2>
+        <div class="field">
+          <label for="proj">Folder (berisi Makefile)</label>
+          <input type="text" id="proj" spellcheck="false">
+        </div>
+        <div class="row">
+          <button class="primary" data-act="flash">Build &amp; Flash</button>
+          <button data-act="build">Build saja</button>
+          <button data-act="clean">Clean</button>
+        </div>
+        <dl class="meta" id="projMeta"></dl>
+        <ul class="binlist" id="bins"></ul>
+      </section>
+
+      <!-- file -->
+      <section class="card">
+        <h2>Dari file .bin</h2>
+        <div class="drop" id="drop">
+          Tarik file <b>.bin</b> ke sini, atau klik untuk memilih
+          <input type="file" id="file" accept=".bin" hidden>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label for="addr">Alamat tujuan</label>
+          <input type="text" id="addr" value="0x08000000" spellcheck="false">
+        </div>
+        <div class="row">
+          <button class="primary" id="flashFile" disabled>Flash file ini</button>
+          <span class="note" id="fileInfo" style="align-self:center;margin:0"></span>
+        </div>
+      </section>
+
+      <!-- lainnya -->
+      <section class="card">
+        <details>
+          <summary>Backup &amp; pemulihan</summary>
+          <div class="row" style="margin-top:0">
+            <button data-act="backup">Backup (make backup)</button>
+            <button data-act="read_flash">Dump isi flash board</button>
+            <button data-act="restore">Restore firmware lama</button>
+          </div>
+          <div class="row">
+            <button class="danger" data-act="erase" data-confirm="Hapus SELURUH flash board?">Erase seluruh flash</button>
+          </div>
+          <p class="note">Backup memakai target di Makefile proyek. Dump menyimpan ke
+            <code>backup/board-dump.bin</code> di folder proyek.</p>
+        </details>
+      </section>
+    </div>
+
+    <!-- log -->
+    <section class="card logcard">
+      <div class="logbar">
+        <h2>Log</h2>
+        <small id="jobLabel"></small>
+        <span class="spacer"></span>
+        <button id="clearLog">Bersihkan</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const projEl = $('#proj'), logEl = $('#log');
+let since = 0, busy = false, pickedFile = null;
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+function fmtSize(n) {
+  return n >= 1024 ? (n / 1024).toFixed(n >= 10240 ? 0 : 1) + ' KB' : n + ' B';
+}
+
+// ---- log polling
+async function poll() {
+  try {
+    const r = await fetch('/api/poll?since=' + since);
+    const d = await r.json();
+    if (d.lines.length) {
+      const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 40;
+      for (const l of d.lines) {
+        const span = document.createElement('span');
+        span.className = l.k;
+        span.textContent = l.k === 'blank' ? '' : l.t + '\n';
+        logEl.appendChild(span);
+      }
+      since = d.seq;
+      if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+    }
+    setBusy(d.job.running, d.job.label);
+    setDevice(d.device);
+  } catch (e) { setDevice({ connected: false, note: 'server tidak merespons' }); }
+}
+
+function setBusy(running, label) {
+  busy = running;
+  $('#jobLabel').textContent = running ? '⟳ ' + label + '…' : '';
+  document.querySelectorAll('button[data-act], #flashFile').forEach(b => {
+    b.disabled = running || (b.id === 'flashFile' && !pickedFile);
+  });
+}
+
+function setDevice(d) {
+  const pill = $('#pill'), txt = $('#pillText');
+  pill.classList.toggle('on', !!d.connected);
+  pill.classList.toggle('off', !d.connected);
+  txt.textContent = d.connected
+    ? `${d.chip} · ${fmtSize(d.flash)} flash`
+    : (d.note || 'tidak terhubung');
+  pill.title = d.connected
+    ? `chipid ${d.chipid}\nserial ${d.serial}\nST-LINK ${d.version}\nSRAM ${fmtSize(d.sram)}`
+    : '';
+}
+
+// ---- aksi
+async function run(action, extra = {}) {
+  const r = await fetch('/api/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, project: projEl.value.trim(), ...extra })
+  });
+  const d = await r.json();
+  if (!d.ok) toast(d.error || 'gagal');
+  else { setBusy(true, action); poll(); }
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]');
+  if (!b || busy) return;
+  if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+  run(b.dataset.act);
+});
+
+$('#clearLog').onclick = () => { logEl.textContent = ''; };
+
+// ---- info proyek
+async function loadProject() {
+  const path = projEl.value.trim();
+  localStorage.setItem('stm32flasher.project', path);
+  const d = await (await fetch('/api/project?path=' + encodeURIComponent(path))).json();
+  const meta = $('#projMeta');
+  meta.innerHTML = '';
+  const add = (k, v) => {
+    meta.insertAdjacentHTML('beforeend',
+      `<dt>${k}</dt><dd>${v}</dd>`);
+  };
+  add('Status', d.exists ? (d.makefile ? 'siap (ada Makefile)' : 'tidak ada Makefile') : 'folder tidak ada');
+
+  const list = $('#bins');
+  list.innerHTML = '';
+  for (const b of d.bins) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="nm"></span><span class="sz">${fmtSize(b.size)}</span>`;
+    li.querySelector('.nm').textContent = b.name;
+    const btn = document.createElement('button');
+    btn.textContent = 'Flash';
+    btn.onclick = () => { if (!busy) run('flash_file', { file: b.path, addr: $('#addr').value.trim() }); };
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+projEl.addEventListener('change', loadProject);
+
+// ---- file .bin
+const drop = $('#drop'), fileEl = $('#file');
+drop.onclick = () => fileEl.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => {
+  e.preventDefault(); drop.classList.remove('over');
+  if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+};
+fileEl.onchange = () => fileEl.files[0] && upload(fileEl.files[0]);
+
+async function upload(f) {
+  $('#fileInfo').textContent = 'mengirim…';
+  const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name),
+    { method: 'POST', body: await f.arrayBuffer() });
+  const d = await r.json();
+  pickedFile = d.path;
+  $('#fileInfo').textContent = `${f.name} — ${fmtSize(d.size)}`;
+  $('#flashFile').disabled = busy;
+  poll();
+}
+
+$('#flashFile').onclick = () => {
+  if (pickedFile && !busy) run('flash_file', { file: pickedFile, addr: $('#addr').value.trim() });
+};
+
+// ---- start
+(async () => {
+  const env = await (await fetch('/api/env')).json();
+  projEl.value = localStorage.getItem('stm32flasher.project') || env.default_project;
+  projEl.placeholder = env.default_project;
+  const missing = Object.entries(env.tools).filter(([, ok]) => !ok).map(([t]) => t);
+  if (missing.length) toast('Belum terpasang: ' + missing.join(', '));
+  await loadProject();
+  poll();
+  setInterval(poll, 500);
+  setInterval(loadProject, 5000);
+})();
+</script>
+</body>
+</html>
