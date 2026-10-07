@@ -119,12 +119,10 @@ static constexpr const char* MQTT_HOST      = "mqtt.icminovasi.my.id";
 static constexpr const char* MQTT_USERNAME  = "partial_discharge";
 static constexpr const char* MQTT_PASSWORD  = "PartialDischarge@2026";
 static constexpr const char* MQTT_DEVICE_ID = "bnd-9bf3";
-//Topik yang digunakan sebelum berangkat ke BnD
-// static constexpr const char* MQTT_TOPIC     = "partial_discharge/bnd-9bf3/pd_signal";
 //Topik untuk mode training
-static constexpr const char* MQTT_TOPIC     = "partial_discharge/+/pd_signal_training";
+static constexpr const char* MQTT_TOPIC     = "partial_discharge/bnd-9bf3/pd_signal_training";
 //Topik untuk mode detect
-// static constexpr const char* MQTT_TOPIC     = "partial_discharge/+/pd_signal";
+// static constexpr const char* MQTT_TOPIC     = "partial_discharge/bnd-9bf3/pd_signal";
 #define WIFI_USE_TLS 1
 static constexpr uint16_t MQTT_PORT_TLS   = 8883;
 static constexpr uint16_t MQTT_PORT_PLAIN = 1883;
